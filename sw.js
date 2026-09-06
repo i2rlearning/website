@@ -13,7 +13,7 @@
 
 "use strict";
 
-const CACHE_NAME = "bible-app-v4";
+const CACHE_NAME = "bible-app-v5";
 const OFFLINE_URL = "/index.html";
 
 const ASSETS_TO_CACHE = [

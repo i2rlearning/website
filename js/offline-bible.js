@@ -90,34 +90,42 @@ async function getBibleVersion(bibleId) {
 
 async function deleteBibleVersion(bibleId) {
   const db = await openDB();
+
+  // Read the keys before opening the write transaction so an await cannot
+  // leave the transaction inactive before the delete requests are queued.
+  const readTransaction = db.transaction(
+    [BOOKS_STORE, CHAPTERS_STORE],
+    "readonly"
+  );
+
+  const books = await requestToPromise(
+    readTransaction.objectStore(BOOKS_STORE).index("bibleId").getAll(IDBKeyRange.only(bibleId))
+  );
+
+  const chapters = await requestToPromise(
+    readTransaction.objectStore(CHAPTERS_STORE).index("bibleId").getAll(IDBKeyRange.only(bibleId))
+  );
+
+  await transactionComplete(readTransaction);
+
   const transaction = db.transaction(
     [STORE_NAME, BOOKS_STORE, CHAPTERS_STORE],
     "readwrite"
   );
-  const completion = transactionComplete(transaction);
 
   transaction.objectStore(STORE_NAME).delete(bibleId);
 
   const booksStore = transaction.objectStore(BOOKS_STORE);
-  const chaptersStore = transaction.objectStore(CHAPTERS_STORE);
-
-  const books = await requestToPromise(
-    booksStore.index("bibleId").getAll(IDBKeyRange.only(bibleId))
-  );
-
   for (const book of books) {
     booksStore.delete(book.id);
   }
 
-  const chapters = await requestToPromise(
-    chaptersStore.index("bibleId").getAll(IDBKeyRange.only(bibleId))
-  );
-
+  const chaptersStore = transaction.objectStore(CHAPTERS_STORE);
   for (const chapter of chapters) {
     chaptersStore.delete(chapter.id);
   }
 
-  await completion;
+  await transactionComplete(transaction);
   return true;
 }
 

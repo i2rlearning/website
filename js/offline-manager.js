@@ -825,6 +825,7 @@ class OfflineManager {
 
       if (books.length === 0) {
         throw new Error("This Bible did not return any books to download.");
+      }
 
       const storedBooks = [];
       const chaptersToDownload = [];

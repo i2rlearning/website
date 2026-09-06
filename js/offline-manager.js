@@ -426,6 +426,9 @@ class OfflineManager {
         : [];
 
       const downloadedIds = new Set(
+        downloaded.filter((version) => version.contentComplete).map((version) => String(version.bibleId))
+      );
+      const storedIds = new Set(
         downloaded.map((version) => String(version.bibleId))
       );
 
@@ -457,6 +460,7 @@ class OfflineManager {
         .map((version) => {
           const id = String(version.id);
           const isDownloaded = downloadedIds.has(id);
+          const isStoredOnly = storedIds.has(id) && !isDownloaded;
           const isDownloading = this.downloading.has(id);
           const isSelected = this.selectedVersionIds.has(id);
 
@@ -476,9 +480,9 @@ class OfflineManager {
                 <span class="version-language">${this.escapeHtml(version.language)}</span>
               </label>
               ${
-                isDownloaded
+                isDownloaded || isStoredOnly
                   ? `<div class="version-download-actions">
-                       <span class="version-downloaded">✓ Downloaded</span>
+                       <span class="${isDownloaded ? "version-downloaded" : "version-needs-content"}">${isDownloaded ? "✓ Ready offline" : "⚠ Stored metadata only - finish download"}</span>
                        <button
                          type="button"
                          class="version-remove-btn"
@@ -493,7 +497,7 @@ class OfflineManager {
         })
         .join("");
 
-      this.updateFilterSummary(versions.length, downloadedIds);
+      this.updateFilterSummary(versions.length, downloadedIds, storedIds);
       this.updateDownloadButtonState(downloadedIds);
     } catch (error) {
       console.error("[Offline] Failed to render Bible versions:", error);
@@ -506,7 +510,7 @@ class OfflineManager {
     }
   }
 
-  updateFilterSummary(visibleCount = null, downloadedIds = null) {
+  updateFilterSummary(visibleCount = null, downloadedIds = null, storedIds = null) {
     if (!this.ui.filterSummary) {
       return;
     }
@@ -526,7 +530,16 @@ class OfflineManager {
         downloadedIds.has(String(version.id))
       ).length;
 
-      summary += ` · ${downloadedCount} already downloaded`;
+      summary += ` · ${downloadedCount} ready offline`;
+
+      if (storedIds) {
+        const metadataOnlyCount = this.availableVersions.filter((version) =>
+          storedIds.has(String(version.id)) && !downloadedIds.has(String(version.id))
+        ).length;
+        if (metadataOnlyCount > 0) {
+          summary += ` · ${metadataOnlyCount} need full text`;
+        }
+      }
     }
 
     this.ui.filterSummary.textContent = summary;
@@ -635,7 +648,16 @@ class OfflineManager {
       this.setStatus(`Preparing ${versionName} for offline use...`, "#333");
 
       try {
-        await this.downloadVersion(versionId);
+        await this.downloadVersion(versionId, (progress) => {
+          const percent = Math.round((progress.completed / progress.total) * 100);
+          if (this.ui.progressBarInner) {
+            this.ui.progressBarInner.style.width = `${percent}%`;
+          }
+          if (this.ui.progressLabel) {
+            this.ui.progressLabel.textContent =
+              `Downloading ${index + 1} of ${versionsToDownload.length}: ${versionName} - chapter ${progress.completed} of ${progress.total}`;
+          }
+        });
         downloadedCount += 1;
         this.selectedVersionIds.delete(versionId);
 
@@ -763,11 +785,15 @@ class OfflineManager {
     this.ui.statusText.style.color = color;
   }
 
-  async downloadVersion(bibleId) {
+  async downloadVersion(bibleId, progressCallback = null) {
     try {
       const apiKey = this.getApiKey();
       if (!apiKey) {
         throw new Error("API.Bible key not found.");
+      }
+
+      if (!window.OfflineBible) {
+        throw new Error("OfflineBible is not available.");
       }
 
       const response = await fetch(
@@ -782,21 +808,146 @@ class OfflineManager {
       }
 
       const data = await response.json();
+      const books = Array.isArray(data?.data?.books)
+        ? data.data.books
+        : Array.isArray(data?.books)
+          ? data.books
+          : [];
 
-      if (!window.OfflineBible) {
-        throw new Error("OfflineBible is not available.");
+      if (books.length === 0) {
+        throw new Error("This Bible did not return any books to download.");
       }
 
-      await window.OfflineBible.storeBibleVersion(bibleId, data);
-      await this.storeBooksAndChapters(bibleId, data);
+      const storedBooks = [];
+      const chaptersToDownload = [];
+
+      for (const book of books) {
+        storedBooks.push({
+          id: `${bibleId}::${book.id}`,
+          bibleId,
+          bookId: book.id,
+          name: book.name,
+          abbreviation: book.abbreviation,
+          testament: book.testament
+        });
+
+        let chapters = Array.isArray(book.chapters) ? book.chapters : [];
+
+        if (chapters.length === 0) {
+          const chapterResponse = await fetch(
+            `https://api.scripture.api.bible/v1/bibles/${encodeURIComponent(bibleId)}/books/${encodeURIComponent(book.id)}/chapters`,
+            { headers: { "api-key": apiKey } }
+          );
+
+          if (!chapterResponse.ok) {
+            throw new Error(
+              `Could not load chapters for ${book.name || book.id} (${chapterResponse.status}).`
+            );
+          }
+
+          const chapterData = await chapterResponse.json();
+          chapters = Array.isArray(chapterData?.data) ? chapterData.data : [];
+        }
+
+        for (const chapter of chapters) {
+          if (!chapter?.id || String(chapter.id).toLowerCase().includes("intro")) {
+            continue;
+          }
+
+          chaptersToDownload.push({
+            bibleId,
+            bookId: book.id,
+            chapterId: chapter.id,
+            reference: chapter.reference,
+            number: chapter.number,
+            bookName: book.name
+          });
+        }
+      }
+
+      if (chaptersToDownload.length === 0) {
+        throw new Error("This Bible did not return any chapters to download.");
+      }
+
+      const downloadedChapters = [];
+      let contentBytes = 0;
+
+      for (let index = 0; index < chaptersToDownload.length; index += 1) {
+        const chapter = chaptersToDownload[index];
+        const chapterResponse = await fetch(
+          `https://api.scripture.api.bible/v1/bibles/${encodeURIComponent(bibleId)}/chapters/${encodeURIComponent(chapter.chapterId)}?content-type=html&include-notes=true&include-titles=true&include-chapter-numbers=true&include-verse-numbers=true&include-verse-spans=false`,
+          { headers: { "api-key": apiKey } }
+        );
+
+        if (!chapterResponse.ok) {
+          throw new Error(
+            `Could not download ${chapter.bookName || chapter.bookId} ${chapter.number || chapter.chapterId} (${chapterResponse.status}).`
+          );
+        }
+
+        const chapterResult = await chapterResponse.json();
+        const content = chapterResult?.data?.content || "";
+
+        if (!content) {
+          throw new Error(
+            `No text was returned for ${chapter.bookName || chapter.bookId} ${chapter.number || chapter.chapterId}.`
+          );
+        }
+
+        contentBytes += new Blob([content]).size;
+        downloadedChapters.push({
+          id: `${bibleId}::${chapter.bookId}::${chapter.chapterId}`,
+          bibleId,
+          bookId: chapter.bookId,
+          chapterId: chapter.chapterId,
+          reference: chapter.reference,
+          number: chapter.number,
+          content,
+          downloadedAt: Date.now()
+        });
+
+        if (typeof progressCallback === "function") {
+          progressCallback({
+            completed: index + 1,
+            total: chaptersToDownload.length,
+            bookName: chapter.bookName,
+            chapterNumber: chapter.number || chapter.chapterId
+          });
+        }
+      }
+
+      // Do not mark the version as offline-ready until every chapter has text.
+      await window.OfflineBible.deleteBibleVersion(bibleId);
+
+      for (const book of storedBooks) {
+        await window.OfflineBible.storeBook(book);
+      }
+      await window.OfflineBible.storeChapters(downloadedChapters);
+
+      await window.OfflineBible.storeBibleVersion(bibleId, {
+        ...data,
+        contentComplete: true,
+        chapterCount: downloadedChapters.length,
+        contentBytes
+      });
+
       return true;
     } catch (error) {
       console.error(`[Offline] Failed to download ${bibleId}:`, error);
+      // Remove partial data so an interrupted download can never look ready.
+      try {
+        if (window.OfflineBible) {
+          await window.OfflineBible.deleteBibleVersion(bibleId);
+        }
+      } catch (cleanupError) {
+        console.warn(`[Offline] Cleanup failed for ${bibleId}:`, cleanupError);
+      }
       throw error;
     }
   }
 
   async storeBooksAndChapters(bibleId, bibleData) {
+    // Kept as a compatibility wrapper for existing callers.
     if (!bibleData || !Array.isArray(bibleData.books)) {
       return;
     }
@@ -811,9 +962,7 @@ class OfflineManager {
         testament: book.testament
       });
 
-      if (!Array.isArray(book.chapters)) {
-        continue;
-      }
+      if (!Array.isArray(book.chapters)) continue;
 
       for (const chapter of book.chapters) {
         await window.OfflineBible.storeChapter({

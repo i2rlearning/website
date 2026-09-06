@@ -231,8 +231,29 @@ window.BibleSelector = (() => {
       );
     }
 
-    const result =
-      await requestJson(apiUrl);
+    let result;
+    try {
+      result = await requestJson(apiUrl);
+    } catch (error) {
+      if (window.OfflineBible) {
+        const stored = await window.OfflineBible.getDownloadedBibleVersions();
+        const hiddenBibleIds = new Set(
+          (window.HiddenBibleVersions || []).map((id) => String(id).trim())
+        );
+        const localBibles = stored
+          .filter((item) => item.contentComplete && !hiddenBibleIds.has(String(item.bibleId)))
+          .map((item) => item.data?.data || item.data)
+          .filter(Boolean);
+        if (localBibles.length > 0) {
+          const bibles = localBibles.sort((a, b) =>
+            getBibleAbbreviation(a).localeCompare(getBibleAbbreviation(b))
+          );
+          cache.biblesByApiUrl.set(apiUrl, bibles);
+          return bibles;
+        }
+      }
+      throw error;
+    }
 
     const apiBibles =
       Array.isArray(result.data)
@@ -286,17 +307,19 @@ window.BibleSelector = (() => {
       );
     }
 
-    const result =
-      await requestJson(
-        `${API_BASE_URL}/bibles/${encodeURIComponent(
-          bibleId
-        )}/books`
+    let books;
+    try {
+      const result = await requestJson(
+        `${API_BASE_URL}/bibles/${encodeURIComponent(bibleId)}/books`
       );
-
-    const books =
-      Array.isArray(result.data)
-        ? result.data
-        : [];
+      books = Array.isArray(result.data) ? result.data : [];
+    } catch (error) {
+      if (window.OfflineBible) {
+        books = await window.OfflineBible.getBooks(bibleId);
+        if (books.length > 0) return books;
+      }
+      throw error;
+    }
 
     cache.booksByBibleId.set(
       bibleId,
@@ -332,14 +355,26 @@ window.BibleSelector = (() => {
       );
     }
 
-    const result =
-      await requestJson(
-        `${API_BASE_URL}/bibles/${encodeURIComponent(
-          bibleId
-        )}/books/${encodeURIComponent(
-          bookId
-        )}/chapters`
+    let result;
+    try {
+      result = await requestJson(
+        `${API_BASE_URL}/bibles/${encodeURIComponent(bibleId)}/books/${encodeURIComponent(bookId)}/chapters`
       );
+    } catch (error) {
+      if (window.OfflineBible) {
+        const localChapters = await window.OfflineBible.getBookChapters(bibleId, bookId);
+        if (localChapters.length > 0) {
+          const chapters = localChapters.filter((chapter) => {
+            const chapterId = String(chapter.chapterId || chapter.id || "").trim().toLowerCase();
+            const chapterNumber = String(chapter.number || "").trim().toLowerCase();
+            return chapterId !== "intro" && chapterNumber !== "intro" && !chapterId.endsWith(".intro");
+          });
+          cache.chaptersByBibleAndBook.set(cacheKey, chapters);
+          return chapters;
+        }
+      }
+      throw error;
+    }
 
   const chapters =
     Array.isArray(result.data)

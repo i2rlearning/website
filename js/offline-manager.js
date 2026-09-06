@@ -673,8 +673,9 @@ class OfflineManager {
       } catch (error) {
         failedCount += 1;
         console.error(`[Offline] Failed to download ${versionId}:`, error);
+        const reason = error?.message ? ` ${error.message}` : "";
         this.setStatus(
-          `Could not download ${versionName}. Continuing with the remaining selections...`,
+          `Could not download ${versionName}.${reason}`,
           "#d32f2f"
         );
       } finally {
@@ -796,27 +797,34 @@ class OfflineManager {
         throw new Error("OfflineBible is not available.");
       }
 
-      const response = await fetch(
-        `https://api.scripture.api.bible/v1/bibles/${encodeURIComponent(
-          bibleId
-        )}?include-full-details=true`,
+      // Fetch the Bible metadata and its complete book/chapter map.
+      // The single-Bible endpoint does not return the books array. API.Bible
+      // provides books (and chapter metadata) through the /books endpoint.
+      const bibleResponse = await fetch(
+        `https://api.scripture.api.bible/v1/bibles/${encodeURIComponent(bibleId)}?include-full-details=true`,
         { headers: { "api-key": apiKey } }
       );
 
-      if (!response.ok) {
-        throw new Error(`API.Bible returned ${response.status}.`);
+      if (!bibleResponse.ok) {
+        throw new Error(`API.Bible returned ${bibleResponse.status} while loading Bible details.`);
       }
 
-      const data = await response.json();
-      const books = Array.isArray(data?.data?.books)
-        ? data.data.books
-        : Array.isArray(data?.books)
-          ? data.books
-          : [];
+      const data = await bibleResponse.json();
+
+      const booksResponse = await fetch(
+        `https://api.scripture.api.bible/v1/bibles/${encodeURIComponent(bibleId)}/books?include-chapters=true`,
+        { headers: { "api-key": apiKey } }
+      );
+
+      if (!booksResponse.ok) {
+        throw new Error(`API.Bible returned ${booksResponse.status} while loading Bible books.`);
+      }
+
+      const booksData = await booksResponse.json();
+      const books = Array.isArray(booksData?.data) ? booksData.data : [];
 
       if (books.length === 0) {
         throw new Error("This Bible did not return any books to download.");
-      }
 
       const storedBooks = [];
       const chaptersToDownload = [];
@@ -833,6 +841,8 @@ class OfflineManager {
 
         let chapters = Array.isArray(book.chapters) ? book.chapters : [];
 
+        // Defensive fallback for any Bible/API response that omits chapter
+        // metadata even when include-chapters=true was requested.
         if (chapters.length === 0) {
           const chapterResponse = await fetch(
             `https://api.scripture.api.bible/v1/bibles/${encodeURIComponent(bibleId)}/books/${encodeURIComponent(book.id)}/chapters`,

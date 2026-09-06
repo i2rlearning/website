@@ -9,7 +9,7 @@
 "use strict";
 
 const DB_NAME = "BibleAppOfflineDB";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = "bibleVersions";
 const BOOKS_STORE = "bibleBooks";
 const CHAPTERS_STORE = "bibleChapters";
@@ -46,6 +46,12 @@ function openDB() {
           chaptersStore.createIndex("bookId", "bookId", { unique: false });
           chaptersStore.createIndex("bibleId", "bibleId", { unique: false });
         }
+
+        // Version 2 adds complete-content tracking to existing version records.
+        if (event.oldVersion < 2 && db.objectStoreNames.contains(STORE_NAME)) {
+          // Existing records are intentionally left in place but are not treated
+          // as offline-ready until their chapter text has been downloaded.
+        }
       };
     });
   }
@@ -66,7 +72,10 @@ async function storeBibleVersion(bibleId, versionData) {
   transaction.objectStore(STORE_NAME).put({
     bibleId,
     data: versionData,
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    contentComplete: Boolean(versionData?.contentComplete),
+    chapterCount: Number(versionData?.chapterCount) || 0,
+    contentBytes: Number(versionData?.contentBytes) || 0
   });
   await transactionComplete(transaction);
   return true;
@@ -119,7 +128,10 @@ async function listDownloadedVersions() {
 
   return result.map((item) => ({
     bibleId: item.bibleId,
-    timestamp: item.timestamp
+    timestamp: item.timestamp,
+    contentComplete: item.contentComplete === true,
+    chapterCount: Number(item.chapterCount) || 0,
+    contentBytes: Number(item.contentBytes) || 0
   }));
 }
 
@@ -173,11 +185,60 @@ async function getBookChapters(bibleId, bookId) {
   const db = await openDB();
   const transaction = db.transaction(CHAPTERS_STORE, "readonly");
   const index = transaction.objectStore(CHAPTERS_STORE).index("bookId");
-  const bookKey = `${bibleId}::${bookId}`;
   const result = await requestToPromise(
-    index.getAll(IDBKeyRange.bound(bookKey, `${bookKey}::\uFFFF`))
+    index.getAll(IDBKeyRange.only(bookId))
   );
   return result;
+}
+
+async function getDownloadedBibleVersions() {
+  const db = await openDB();
+  const transaction = db.transaction(STORE_NAME, "readonly");
+  const result = await requestToPromise(transaction.objectStore(STORE_NAME).getAll());
+
+  return result.map((item) => ({
+    bibleId: item.bibleId,
+    data: item.data,
+    timestamp: item.timestamp,
+    contentComplete: item.contentComplete === true,
+    chapterCount: Number(item.chapterCount) || 0,
+    contentBytes: Number(item.contentBytes) || 0
+  }));
+}
+
+async function getBooks(bibleId) {
+  const db = await openDB();
+  const transaction = db.transaction(BOOKS_STORE, "readonly");
+  const result = await requestToPromise(
+    transaction.objectStore(BOOKS_STORE).index("bibleId").getAll(IDBKeyRange.only(bibleId))
+  );
+  return result;
+}
+
+async function getChapterContent(bibleId, bookId, chapterId) {
+  const chapter = await getChapter(bibleId, bookId, chapterId);
+  return chapter?.content || null;
+}
+
+async function hasCompleteOfflineBible(bibleId) {
+  const version = await getBibleVersionRecord(bibleId);
+  return Boolean(version?.contentComplete);
+}
+
+async function getBibleVersionRecord(bibleId) {
+  const db = await openDB();
+  const transaction = db.transaction(STORE_NAME, "readonly");
+  return requestToPromise(transaction.objectStore(STORE_NAME).get(bibleId));
+}
+
+async function storeChapters(chapters) {
+  if (!Array.isArray(chapters) || chapters.length === 0) return true;
+  const db = await openDB();
+  const transaction = db.transaction(CHAPTERS_STORE, "readwrite");
+  const store = transaction.objectStore(CHAPTERS_STORE);
+  for (const chapter of chapters) store.put(chapter);
+  await transactionComplete(transaction);
+  return true;
 }
 
 function transactionComplete(transaction) {
@@ -202,5 +263,11 @@ window.OfflineBible = {
   storeBook,
   storeChapter,
   getChapter,
-  getBookChapters
+  getChapterContent,
+  getBookChapters,
+  getBooks,
+  getDownloadedBibleVersions,
+  hasCompleteOfflineBible,
+  getBibleVersionRecord,
+  storeChapters
 };

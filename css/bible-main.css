@@ -1916,3 +1916,16 @@ header .offline-toggle-btn {
   margin: 15px 0;
   min-height: 20px;
 }
+
+.version-needs-content {
+  color: #b26a00;
+  font-weight: 600;
+}
+
+.version-item-downloading {
+  position: relative;
+}
+
+#offline-modal .version-remove-btn {
+  margin-left: 10px;
+}
